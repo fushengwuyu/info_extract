@@ -65,7 +65,7 @@ class Trainer(object):
                 loss = self.forward(batch, is_eval=False)
                 if step % step_gap == 0:
                     info = "step {} / {} of epoch {}, train/loss: {}"
-                    print(info.format(step, len(self.train_dataloader) / self.args.batch_size, epoch, loss.item()))
+                    print(info.format(step, self.train_dataloader, epoch, loss.item()))
 
                 if (step + 1) % step_eval == 0:
 
@@ -105,7 +105,7 @@ class Trainer(object):
             返回 [(i, j), p, (i, j)]
             """
             answers = []
-            input_ids, attention_mask, token_type_ids, start_label, end_label, entity_type, r_label = batch
+            input_ids, attention_mask, token_type_ids = batch
             batch_subject, batch_end_list, out = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,

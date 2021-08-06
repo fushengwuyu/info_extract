@@ -1,5 +1,6 @@
 # author: sunshine
 # datetime:2021/7/29 下午4:53
+
 from argparse import Namespace
 from transformers import BertTokenizerFast
 from src.re.muti_head.data_loader import load_data, MutiHeadDataset, load_mapping
@@ -58,7 +59,8 @@ def build_dataset(args, tokenizer, debug=False):
         tokenizer=tokenizer,
         predict2id=p2id,
         entity2id=e2id,
-        max_len=256
+        max_len=256,
+        is_train=False
     ).get_data_loader(batch_size=args.batch_size)
 
     return (train_data_loader, valid_data_loader), p2id, e2id
@@ -88,3 +90,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

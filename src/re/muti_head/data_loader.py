@@ -61,7 +61,7 @@ class MutiHeadDataset(Dataset):
             batch_start_tokens, batch_end_tokens, batch_so, batch_relations = [], [], [], []
             texts = [t[0] for t in examples]
             inputs = self.tokenizer(texts, padding='longest', max_length=self.max_len,
-                                    truncation='longest_first', return_offset_mapping=True)
+                                    truncation='longest_first', return_offsets_mapping=True)
             input_ids = inputs['input_ids']
             attention_mask = inputs['attention_mask']
             token_type_ids = inputs['token_type_ids']
