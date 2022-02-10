@@ -1,40 +1,43 @@
 # author: sunshine
 # datetime:2021/7/23 上午10:17
 import torch
-from transformers import BertModel
-from torch.nn import Module
+from transformers import BertModel, BertPreTrainedModel
 import torch.nn as nn
 import math
 from torch.nn.parameter import Parameter
 
 
-class Net(Module):
-    def __init__(self, args, num_class):
-        super(Net, self).__init__()
-        self.bert = BertModel.from_pretrained(args.bert_path)
+class Net(BertPreTrainedModel):
+    def __init__(self, config, head_type, num_class, max_len=256):
+        super(Net, self).__init__(config)
+        self.bert = BertModel(config)
 
-        if args.head_type == 'GlobalPointer':
+        if head_type == 'GlobalPointer':
 
-            self.head = GlobalPointer(heads=num_class, head_size=64, hidden_size=768)
+            self.head = GlobalPointer(heads=num_class, head_size=64, hidden_size=config.hidden_size)
 
-        elif args.head_type == 'Biaffine':
-            self.head = Biaffine(in_size=768, out_size=num_class, Position=False)
+        elif head_type == 'Biaffine':
+            self.head = Biaffine(in_size=config.hidden_size, out_size=num_class, Position=False)
 
-        elif args.head_type == 'Mutihead':
-            self.head = MutiHeadSelection(hidden_size=768, c_size=num_class, re_position=True, max_len=args.max_len)
+        elif head_type == 'Mutihead':
+            self.head = MutiHeadSelection(hidden_size=config.hidden_size, c_size=num_class, re_position=True,
+                                          max_len=max_len)
 
-        elif args.head_type == 'TxMutihead':
-            self.head = TxMutihead(hidden_size=768, c_size=num_class, abPosition=True, maxlen=args.max_len)
+        elif head_type == 'TxMutihead':
+            self.head = TxMutihead(hidden_size=config.hidden_size, c_size=num_class, abPosition=True, maxlen=max_len)
+        elif head_type == 'EfficientGlobalPointer':
+            self.head = EfficientGlobalPointer(heads=num_class, head_size=64, hidden_size=config.hidden_size)
+        self.init_weights()
 
     def forward(self, input_ids, attention_mask, token_type_ids, label=None):
         x = self.bert(input_ids, token_type_ids, attention_mask)
         x = x.last_hidden_state
         logits = self.head(x, mask=attention_mask)
-        r_logits = (logits,)
         if label is not None:
             loss = self.global_pointer_crossentropy(label, logits)
-            r_logits = r_logits + (loss,)
-        return r_logits
+            return loss
+        else:
+            return logits
 
     def multilabel_categorical_crossentropy(self, y_true, y_pred):
         """
@@ -113,7 +116,7 @@ def relative_position_encoding(depth, max_length=512, max_relative_position=127)
     return positions_encoding
 
 
-class SinusoidalPositionEmbedding(Module):
+class SinusoidalPositionEmbedding(nn.Module):
     """定义Sin-Cos位置Embedding
     """
 
@@ -141,15 +144,16 @@ class SinusoidalPositionEmbedding(Module):
             return embeddings.to(inputs.device)
 
 
-class GlobalPointer(Module):
-    def __init__(self, heads, head_size, hidden_size, RoPE=True):
+class GlobalPointer(nn.Module):
+    def __init__(self, heads, head_size, hidden_size, RoPE=True, tril_mask=True):
         super(GlobalPointer, self).__init__()
+        self.tril_mask = tril_mask
         self.heads = heads
         self.head_size = head_size
         self.RoPE = RoPE
         self.dense = nn.Linear(hidden_size, self.head_size * self.heads * 2)
 
-    def forward(self, inputs, mask=None):
+    def forward(self, inputs, mask=None, ):
         inputs = self.dense(inputs)
 
         inputs = torch.split(inputs, self.head_size * 2, dim=-1)
@@ -160,6 +164,17 @@ class GlobalPointer(Module):
         # RoPE编码
         if self.RoPE:
             pos = SinusoidalPositionEmbedding(self.head_size, 'zero')(inputs)
+
+            """
+            cos_pos = K.repeat_elements(pos[..., None, 1::2], 2, -1)
+            sin_pos = K.repeat_elements(pos[..., None, ::2], 2, -1)
+            qw2 = K.stack([-qw[..., 1::2], qw[..., ::2]], 4)
+            qw2 = K.reshape(qw2, K.shape(qw))
+            qw = qw * cos_pos + qw2 * sin_pos
+            kw2 = K.stack([-kw[..., 1::2], kw[..., ::2]], 4)
+            kw2 = K.reshape(kw2, K.shape(kw))
+            kw = kw * cos_pos + kw2 * sin_pos
+            """
             cos_pos = pos[..., None, 1::2].repeat(1, 1, 1, 2)
             sin_pos = pos[..., None, ::2].repeat(1, 1, 1, 2)
             qw2 = torch.stack([-qw[..., 1::2], qw[..., ::2]], 4)
@@ -173,11 +188,47 @@ class GlobalPointer(Module):
         logits = torch.einsum('bmhd, bnhd->bhmn', qw, kw)
 
         # 排除padding  排除下三角
-        logits = add_mask_tril(logits, mask)
+        if self.tril_mask:
+            logits = add_mask_tril(logits, mask)
         return logits / self.head_size ** 0.5
 
 
-class MutiHeadSelection(Module):
+class EfficientGlobalPointer(nn.Module):
+    """全局指针模块
+    将序列的每个(start, end)作为整体来进行判断
+    """
+
+    def __init__(self, heads, head_size, hidden_size, RoPE=True):
+        super(EfficientGlobalPointer, self).__init__()
+        self.heads = heads
+        self.head_size = head_size
+        self.RoPE = RoPE
+        self.hidden_size = hidden_size
+        self.linear_1 = nn.Linear(hidden_size, head_size * 2, bias=True)
+        self.linear_2 = nn.Linear(head_size * 2, heads * 2, bias=True)
+
+    def forward(self, inputs, mask=None):
+        inputs = self.linear_1(inputs)
+        qw, kw = inputs[..., ::2], inputs[..., 1::2]
+        # RoPE编码
+        if self.RoPE:
+            pos = SinusoidalPositionEmbedding(self.head_size, 'zero')(inputs)
+            cos_pos = pos[..., 1::2].repeat(1, 1, 2)
+            sin_pos = pos[..., ::2].repeat(1, 1, 2)
+            qw2 = torch.stack([-qw[..., 1::2], qw[..., ::2]], 3)
+            qw2 = torch.reshape(qw2, qw.shape)
+            qw = qw * cos_pos + qw2 * sin_pos
+            kw2 = torch.stack([-kw[..., 1::2], kw[..., ::2]], 3)
+            kw2 = torch.reshape(kw2, kw.shape)
+            kw = kw * cos_pos + kw2 * sin_pos
+        logits = torch.einsum('bmd , bnd -> bmn', qw, kw) / self.head_size ** 0.5
+        bias = torch.einsum('bnh -> bhn', self.linear_2(inputs)) / 2
+        logits = logits[:, None] + bias[:, ::2, None] + bias[:, 1::2, :, None]
+        # 排除padding跟下三角
+        logits = add_mask_tril(logits, mask)
+        return logits
+
+class MutiHeadSelection(nn.Module):
     def __init__(self, hidden_size, c_size, ab_position=False, re_position=False, max_len=512, max_relative=127):
         super(MutiHeadSelection, self).__init__()
         self.hidden_size = hidden_size
@@ -212,7 +263,7 @@ class MutiHeadSelection(Module):
         return logits
 
 
-class TxMutihead(Module):
+class TxMutihead(nn.Module):
 
     def __init__(self, hidden_size, c_size, abPosition=False, rePosition=False, maxlen=None, max_relative=127):
         super(TxMutihead, self).__init__()
@@ -247,7 +298,7 @@ class TxMutihead(Module):
         return logits
 
 
-class Biaffine(Module):
+class Biaffine(nn.Module):
 
     def __init__(self, in_size, out_size, Position=False):
         super(Biaffine, self).__init__()

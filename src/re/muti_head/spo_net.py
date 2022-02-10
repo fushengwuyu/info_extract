@@ -180,7 +180,7 @@ class SPOBiaffine(nn.Module):
             e, et = np.where(end > 0.5)
 
             entities, end_list = [], []
-            s_stop = np.zeros((seq_len, ))
+            s_stop = np.zeros((seq_len,))
 
             for i, t in zip(s, st):
                 j = e[e >= i]
@@ -197,12 +197,6 @@ class SPOBiaffine(nn.Module):
         cs_ids = torch.tensor(cs_ids, dtype=torch.long)
         return batch_subject, batch_end_list, cs_ids
 
+
 if __name__ == '__main__':
-
-    biaffine = Biaffine(10, 4, 128)
-
-    f1 = torch.rand((4, 16, 10))
-    f2 = torch.rand((4, 16, 10))
-
-    o = biaffine(f1, f2)
-    print(o.shape)
+    ...
