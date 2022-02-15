@@ -1,7 +1,7 @@
 # author: sunshine
 # datetime:2021/7/28 上午11:19
 import torch
-from transformers import BertModel
+from transformers import BertModel, BertPreTrainedModel
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 import numpy as np
@@ -90,10 +90,10 @@ class SPOMutiHead(nn.Module):
         return start_logits, end_logits, out
 
 
-class SPOBiaffine(nn.Module):
-    def __init__(self, args, p_num, e_num):
-        super(SPOBiaffine, self).__init__()
-        self.bert = BertModel.from_pretrained(args.bert_path)
+class SPOBiaffine(BertPreTrainedModel):
+    def __init__(self, config, p_num, e_num, max_len=256):
+        super(SPOBiaffine, self).__init__(config)
+        self.bert = BertModel(config)
         self.start_dense = nn.Sequential(
             nn.Linear(768, 256),
             nn.ReLU(),
@@ -122,11 +122,13 @@ class SPOBiaffine(nn.Module):
             nn.ReLU()
         )
 
-        self.biaffine = Biaffine(128 + 100, p_num, args.max_len)
+        self.biaffine = Biaffine(128 + 100, p_num, max_len)
         self.sigmoid = nn.Sigmoid()
+        self.loss_bce = torch.nn.BCELoss()
+        self.init_weights()
 
-    def forward(self, input_ids, attention_mask, type_ids, cs_ids=None):
-        x = self.bert(input_ids, attention_mask, type_ids, output_hidden_states=True)
+    def forward(self, input_ids, attention_mask, token_type_ids, cs_ids=None, labels=None):
+        x = self.bert(input_ids, token_type_ids, attention_mask, output_hidden_states=True)
         hidden_states = x.hidden_states
         layer_1 = hidden_states[-1]
         layer_2 = hidden_states[-2]
@@ -147,13 +149,18 @@ class SPOBiaffine(nn.Module):
             f2 = self.f2_dense(concat_cs)
             f2 = torch.cat([f2, cs_emb], dim=-1)
 
-            biaffine_layer = self.biaffine(f1, f2)
-            out = self.sigmoid(biaffine_layer)
-            out = out ** 4
-            return start_logits, end_logits, out
+            p_logits = self.biaffine(f1, f2)
+            # out = self.sigmoid(biaffine_layer)
+            # out = out ** 4
+            start_label, end_label, p_label = labels
+
+            start_loss = self.loss_bce(start_logits, start_label.float())
+            end_loss = self.loss_bce(end_logits, end_label.float())
+            p_loss = self.global_pointer_crossentropy(p_label, p_logits)
+            return start_loss + end_loss + p_loss
         else:
             # 推理
-            batch_subject, batch_end_list, cs_ids = self.extract_type(start_logits, end_logits)
+            batch_entity, batch_end_list, cs_ids = self.extract_type(start_logits, end_logits)
             cs_emb = self.emb(cs_ids)
             concat_cs = torch.cat([layer_1, layer_2], dim=-1)
 
@@ -163,39 +170,61 @@ class SPOBiaffine(nn.Module):
             f2 = self.f2_dense(concat_cs)
             f2 = torch.cat([f2, cs_emb], dim=-1)
 
-            biaffine_layer = self.biaffine(f1, f2)
-            out = self.sigmoid(biaffine_layer)
-            out = out ** 4
-            return batch_subject, batch_end_list, out
+            out = self.biaffine(f1, f2)
+
+            return batch_entity, batch_end_list, out
 
     def extract_type(self, start_logits, end_logits):
 
         start_logits = start_logits.cpu().numpy()
         end_logits = end_logits.cpu().numpy()
         cs_ids = []
-        batch_subject, batch_end_list = [], []
+        batch_entity, batch_end_list = [], []
         seq_len = start_logits.shape[1]
         for start, end in zip(start_logits, end_logits):
             s, st = np.where(start > 0.5)
             e, et = np.where(end > 0.5)
 
             entities, end_list = [], []
-            s_stop = np.zeros((seq_len,))
+            s_stop = np.zeros((seq_len,), dtype=np.int)
 
             for i, t in zip(s, st):
                 j = e[e >= i]
-                et = et[e >= i]
-                if len(j) > 0 and et[0] == t:
+
+                _et = et[e >= i]
+                if len(j) > 0 and _et[0] == t:
                     _j = j[0]
                     end_list.append(_j)
                     entities.append((i, _j))
-                    s_stop[0][_j] = t
+                    s_stop[_j] = t
 
             cs_ids.append(s_stop)
-            batch_subject.append(entities)
+            batch_entity.append(entities)
             batch_end_list.append(end_list)
         cs_ids = torch.tensor(cs_ids, dtype=torch.long)
-        return batch_subject, batch_end_list, cs_ids
+        return batch_entity, batch_end_list, cs_ids
+
+    def multilabel_categorical_crossentropy(self, y_true, y_pred):
+        """
+        多标签交叉熵
+        """
+        y_pred = (1 - 2 * y_true) * y_pred
+        y_pred_neg = y_pred - y_true * 1e12
+        y_pred_pos = y_pred - (1 - y_true) * 1e12
+        zeros = torch.zeros_like(y_pred[..., :1])
+        y_pred_neg = torch.cat([y_pred_neg, zeros], dim=-1)
+        y_pred_pos = torch.cat([y_pred_pos, zeros], dim=-1)
+        neg_loss = torch.logsumexp(y_pred_neg, dim=-1)
+        pos_loss = torch.logsumexp(y_pred_pos, dim=-1)
+        return neg_loss + pos_loss
+
+    def global_pointer_crossentropy(self, y_true, y_pred):
+        """结合GlobalPointer设计的交叉熵
+        """
+        bh = y_pred.shape[0] * y_pred.shape[1]
+        y_true = torch.reshape(y_true, (bh, -1))
+        y_pred = torch.reshape(y_pred, (bh, -1))
+        return torch.mean(self.multilabel_categorical_crossentropy(y_true, y_pred))
 
 
 if __name__ == '__main__':

@@ -142,3 +142,4 @@ cython_debug/
 dataset/ner
 dataset/re
 models/
+./t.py

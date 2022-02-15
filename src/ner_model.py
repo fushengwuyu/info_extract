@@ -82,12 +82,6 @@ def add_mask_tril(logits, mask):
     if mask.dtype != logits.dtype:
         mask = mask.type(logits.dtype)
 
-    logits = sequence_masking(logits, mask, '-inf', logits.ndim - 2)
-    logits = sequence_masking(logits, mask, '-inf', logits.ndim - 1)
-
-    # 排除下三角
-    mask = torch.tril(torch.ones_like(logits), diagonal=-1)
-    logits = logits - mask * 1e12
     return logits
 
 
@@ -153,7 +147,7 @@ class GlobalPointer(nn.Module):
         self.RoPE = RoPE
         self.dense = nn.Linear(hidden_size, self.head_size * self.heads * 2)
 
-    def forward(self, inputs, mask=None, ):
+    def forward(self, inputs, mask=None):
         inputs = self.dense(inputs)
 
         inputs = torch.split(inputs, self.head_size * 2, dim=-1)
@@ -187,9 +181,15 @@ class GlobalPointer(nn.Module):
         # 计算内积
         logits = torch.einsum('bmhd, bnhd->bhmn', qw, kw)
 
-        # 排除padding  排除下三角
+        # 排除padding
+        logits = sequence_masking(logits, mask, '-inf', logits.ndim - 2)
+        logits = sequence_masking(logits, mask, '-inf', logits.ndim - 1)
+
+        # 排除下三角
         if self.tril_mask:
-            logits = add_mask_tril(logits, mask)
+            mask = torch.tril(torch.ones_like(logits), diagonal=-1)
+            logits = logits - mask * 1e12
+
         return logits / self.head_size ** 0.5
 
 
@@ -227,6 +227,7 @@ class EfficientGlobalPointer(nn.Module):
         # 排除padding跟下三角
         logits = add_mask_tril(logits, mask)
         return logits
+
 
 class MutiHeadSelection(nn.Module):
     def __init__(self, hidden_size, c_size, ab_position=False, re_position=False, max_len=512, max_relative=127):

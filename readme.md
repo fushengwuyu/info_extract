@@ -23,3 +23,11 @@ https://github.com/zhengyanzhao1997/NLP-model
 | EfficientGlobalPointer | 0.7980 | 0.7858 | 0.7918 |
 | TxMutihead             | 0.8336 | 0.7680 | 0.7994 |
 
+#### spo三元组抽取
+
+|          | P      | R      | f1     |
+| -------- | ------ | ------ | ------ |
+| biaffine | 0.7228 | 0.7438 | 0.7331 |
+|          |        |        |        |
+|          |        |        |        |
+
